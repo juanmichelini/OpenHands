@@ -40,9 +40,7 @@ jobs:
           # Only build nikolaik on PRs, otherwise build both nikolaik and ubuntu.
           if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
             json=$(jq -n -c '[
-                { image: "nikolaik/python-nodejs:python3.12-nodejs22", tag: "nikolaik" },
-                { image: "ubuntu:24.04", tag: "ubuntu" }
-
+                { image: "nikolaik/python-nodejs:python3.12-nodejs22", tag: "nikolaik" }
               ]')
           else
             json=$(jq -n -c '[
@@ -176,19 +174,20 @@ jobs:
           build-args: ${{ env.DOCKER_BUILD_ARGS }}
           context: containers/runtime
           provenance: false
-      # Forked repos can't push to GHCR, so we just build in order to populate the cache for rebuilding
+      # Forked repos can't push to GHCR, so we need to upload the image as an artifact
       - name: Build runtime image ${{ matrix.base_image.image }} for fork
         if: github.event.pull_request.head.repo.fork
         uses: useblacksmith/build-push-action@v1
         with:
           tags: ghcr.io/${{ env.REPO_OWNER }}/runtime:${{ env.RELEVANT_SHA }}-${{ matrix.base_image.tag }}
+          outputs: type=docker,dest=/tmp/runtime-${{ matrix.base_image.tag }}.tar
           context: containers/runtime
-      - name: Upload runtime source for fork
+      - name: Upload runtime image for fork
         if: github.event.pull_request.head.repo.fork
         uses: actions/upload-artifact@v4
         with:
-          name: runtime-src-${{ matrix.base_image.tag }}
-          path: containers/runtime
+          name: runtime-${{ matrix.base_image.tag }}
+          path: /tmp/runtime-${{ matrix.base_image.tag }}.tar
 
   verify_hash_equivalence_in_runtime_and_app:
     name: Verify Hash Equivalence in Runtime and Docker images
@@ -249,7 +248,7 @@ jobs:
   test_runtime_root:
     name: RT Unit Tests (Root)
     needs: [ghcr_build_runtime, define-matrix]
-    runs-on: blacksmith-8vcpu-ubuntu-2204
+    runs-on: blacksmith-4vcpu-ubuntu-2204
     strategy:
       fail-fast: false
       matrix:
@@ -259,23 +258,17 @@ jobs:
       - name: Set up Docker Buildx
         id: buildx
         uses: docker/setup-buildx-action@v3
-      - name: Download runtime source for fork
+      # Forked repos can't push to GHCR, so we need to download the image as an artifact
+      - name: Download runtime image for fork
         if: github.event.pull_request.head.repo.fork
         uses: actions/download-artifact@v4
         with:
-          name: runtime-src-${{ matrix.base_image.tag }}
-          path: containers/runtime
-      - name: Lowercase Repository Owner
-        run: |
-          echo REPO_OWNER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]') >> $GITHUB_ENV
-      # Forked repos can't push to GHCR, so we need to rebuild using cache
-      - name: Build runtime image ${{ matrix.base_image.image }} for fork
+          name: runtime-${{ matrix.base_image.tag }}
+          path: /tmp
+      - name: Load runtime image for fork
         if: github.event.pull_request.head.repo.fork
-        uses: useblacksmith/build-push-action@v1
-        with:
-          load: true
-          tags: ghcr.io/${{ env.REPO_OWNER }}/runtime:${{ env.RELEVANT_SHA }}-${{ matrix.base_image.tag }}
-          context: containers/runtime
+        run: |
+          docker load --input /tmp/runtime-${{ matrix.base_image.tag }}.tar
       - name: Cache Poetry dependencies
         uses: useblacksmith/cache@v5
         with:
@@ -293,7 +286,10 @@ jobs:
       - name: Install poetry via pipx
         run: pipx install poetry
       - name: Install Python dependencies using Poetry
-        run: make install-python-dependencies POETRY_GROUP=main,test,runtime INSTALL_PLAYWRIGHT=0
+        run: make install-python-dependencies INSTALL_PLAYWRIGHT=0
+      - name: Lowercase Repository Owner
+        run: |
+          echo REPO_OWNER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]') >> $GITHUB_ENV
       - name: Run docker runtime tests
         run: |
           # We install pytest-xdist in order to run tests across CPUs
@@ -312,12 +308,16 @@ jobs:
           SANDBOX_RUNTIME_CONTAINER_IMAGE=$image_name \
           TEST_IN_CI=true \
           RUN_AS_OPENHANDS=false \
-          poetry run pytest -n 7 -raRs --reruns 2 --reruns-delay 5 -s ./tests/runtime --ignore=tests/runtime/test_browsergym_envs.py --durations=10
+          poetry run pytest -n 3 -raRs --reruns 2 --reruns-delay 5 --cov=openhands --cov-report=xml -s ./tests/runtime --ignore=tests/runtime/test_browsergym_envs.py
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   # Run unit tests with the Docker runtime Docker images as openhands user
   test_runtime_oh:
     name: RT Unit Tests (openhands)
-    runs-on: blacksmith-8vcpu-ubuntu-2204
+    runs-on: blacksmith-4vcpu-ubuntu-2204
     needs: [ghcr_build_runtime, define-matrix]
     strategy:
       matrix:
@@ -327,23 +327,17 @@ jobs:
       - name: Set up Docker Buildx
         id: buildx
         uses: docker/setup-buildx-action@v3
-      - name: Download runtime source for fork
+      # Forked repos can't push to GHCR, so we need to download the image as an artifact
+      - name: Download runtime image for fork
         if: github.event.pull_request.head.repo.fork
         uses: actions/download-artifact@v4
         with:
-          name: runtime-src-${{ matrix.base_image.tag }}
-          path: containers/runtime
-      - name: Lowercase Repository Owner
-        run: |
-          echo REPO_OWNER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]') >> $GITHUB_ENV
-      # Forked repos can't push to GHCR, so we need to rebuild using cache
-      - name: Build runtime image ${{ matrix.base_image.image }} for fork
+          name: runtime-${{ matrix.base_image.tag }}
+          path: /tmp
+      - name: Load runtime image for fork
         if: github.event.pull_request.head.repo.fork
-        uses: useblacksmith/build-push-action@v1
-        with:
-          load: true
-          tags: ghcr.io/${{ env.REPO_OWNER }}/runtime:${{ env.RELEVANT_SHA }}-${{ matrix.base_image.tag }}
-          context: containers/runtime
+        run: |
+          docker load --input /tmp/runtime-${{ matrix.base_image.tag }}.tar
       - name: Cache Poetry dependencies
         uses: useblacksmith/cache@v5
         with:
@@ -361,7 +355,10 @@ jobs:
       - name: Install poetry via pipx
         run: pipx install poetry
       - name: Install Python dependencies using Poetry
-        run: make install-python-dependencies POETRY_GROUP=main,test,runtime INSTALL_PLAYWRIGHT=0
+        run: make install-python-dependencies INSTALL_PLAYWRIGHT=0
+      - name: Lowercase Repository Owner
+        run: |
+          echo REPO_OWNER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]') >> $GITHUB_ENV
       - name: Run runtime tests
         run: |
           # We install pytest-xdist in order to run tests across CPUs
@@ -377,7 +374,11 @@ jobs:
           SANDBOX_RUNTIME_CONTAINER_IMAGE=$image_name \
           TEST_IN_CI=true \
           RUN_AS_OPENHANDS=true \
-          poetry run pytest -n 7 -raRs --reruns 2 --reruns-delay 5 -s ./tests/runtime --ignore=tests/runtime/test_browsergym_envs.py --durations=10
+          poetry run pytest -n 3 -raRs --reruns 2 --reruns-delay 5 --cov=openhands --cov-report=xml -s ./tests/runtime --ignore=tests/runtime/test_browsergym_envs.py
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   # The two following jobs (named identically) are to check whether all the runtime tests have passed as the
   # "All Runtime Tests Passed" is a required job for PRs to merge
