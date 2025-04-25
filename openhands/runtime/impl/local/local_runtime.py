@@ -108,7 +108,7 @@ class LocalRuntime(ActionExecutionClient):
     ):
         self.config = config
         self._user_id = os.getuid()
-        self._username = os.getenv('USER')
+        self._username = 'openhands'  # Use 'openhands' instead of the current user to ensure VS Code plugin works
 
         if self.config.workspace_base is not None:
             logger.warning(
